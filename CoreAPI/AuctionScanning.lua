@@ -36,14 +36,9 @@ function TSMAPI.Auction:ScanQuery(module, query, callbackHandler, resolveSellers
 	private.callbackHandler = callbackHandler
 	private.database = database
 	private.currentModule = module
-	-- Disabled: this relies on the server actually honoring the name
-	-- filter in QueryAuctionItems (comparing page content hashes to
-	-- detect when results stop changing, so later pages can be
-	-- skipped) - confirmed via diagnostic that this server's AH
-	-- ignores the name filter entirely (any non-empty name returns
-	-- zero raw results, even for items with live auctions), so every
-	-- page now genuinely differs and skipping on a hash match would
-	-- risk silently dropping real auctions instead of just being slow.
+	if query.name ~= "" and (not query.items or #query.items == 1) then
+		private.optimize = true
+	end
 	TSM:SetAuctionTabFlashing(private.currentModule, true)
 
 	-- set up the query
@@ -349,16 +344,17 @@ function private.ScanThreadDoQuery(self, query)
 			query.filterInfoCache = {{classID=query.class, subClassID=query.subClass, inventoryType=query.invType}}
 		end		
 	end
-	-- This server's AH search does not filter by name server-side
-	-- (confirmed via diagnostic: any non-empty name here returns zero
-	-- raw results, even for items confirmed to have live auctions via
-	-- AuctionDB's own name-less full scan) - so every caller of
-	-- ScanQuery now gets the *entire* unfiltered page back and is
-	-- expected to re-match query.name client-side itself, same as
-	-- every caller already does for defense-in-depth (e.g. Shopping's
-	-- AuctionTabUtil:GetMatchingFilter) - query.name itself is left
-	-- untouched since callers still read it for that client-side match.
-	QueryAuctionItems("", query.minLevel, query.maxLevel, query.page, query.usable, query.quality, nil, query.exact, query.filterInfoCache)
+	-- query.quality == 0 means "no quality filter" everywhere else in this
+	-- codebase (see AuctionTab_Util.lua's own IsAuctionRecordValid-style
+	-- check: "query.quality == 0" is treated as unfiltered). But this is
+	-- sent to the AH server as a literal qualityIndex, and on this server
+	-- quality 0 is apparently a real tier (Poor), not a "no filter"
+	-- sentinel: every plain name search (which always defaults quality to
+	-- 0) was coming back with zero results even though an identical search
+	-- in Blizzard's own default AH Browse tab finds matches fine. Match the
+	-- "0 means unfiltered" convention this addon already uses by not
+	-- sending a quality constraint at all in that case.
+	QueryAuctionItems(query.name, query.minLevel, query.maxLevel, query.page, query.usable, (query.quality ~= 0 and query.quality or nil), nil, query.exact, query.filterInfoCache)
 
 	-- wait for the update event
 	self:WaitForEvent("AUCTION_ITEM_LIST_UPDATE")
