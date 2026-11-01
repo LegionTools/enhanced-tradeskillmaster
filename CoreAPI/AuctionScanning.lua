@@ -644,17 +644,30 @@ function private.GetAllScanThread(self)
 
 	local numAuctions, totalNum = GetNumAuctionItems("list")
 	if numAuctions ~= totalNum then
-		return private:DoCallback("GETALL_BAD_DATA")
+		TSM:LOG_ERR("GetAll scan: server returned an incomplete initial auction list (%d of %d auctions loaded)", numAuctions, totalNum)
+		return private:DoCallback("GETALL_BAD_DATA", format("incomplete initial data (%d/%d auctions loaded)", numAuctions, totalNum))
 	end
 	private:DoCallback("GETALL_PROGRESS", 1, numAuctions)
 
 	-- scan the results (slowly as to not cause disconnects)
 	local scanData = {}
 	for i=1, numAuctions do
-		local itemString = TSMAPI.Item:ToBaseItemString(GetAuctionItemLink("list", i))
-		local _, _, stackSize, _, _, _, _, _, _, buyout = GetAuctionItemInfo("list", i)
+		local itemString, stackSize, buyout
+		for retry=0, MAX_SOFT_RETRIES do
+			itemString = TSMAPI.Item:ToBaseItemString(GetAuctionItemLink("list", i))
+			local _
+			_, _, stackSize, _, _, _, _, _, _, buyout = GetAuctionItemInfo("list", i)
+			if itemString and stackSize and buyout then
+				break
+			end
+			-- the item link can briefly lag behind the rest of the auction data
+			-- (the client still has to resolve/cache the item itself), so give
+			-- it a moment to show up before treating this as genuinely bad data
+			self:Sleep(SCAN_RESULT_DELAY)
+		end
 		if not itemString or not stackSize or not buyout then
-			return private:DoCallback("GETALL_BAD_DATA")
+			TSM:LOG_ERR("GetAll scan: auction %d/%d still had incomplete data after retrying (itemString=%s, stackSize=%s, buyout=%s)", i, numAuctions, tostring(itemString), tostring(stackSize), tostring(buyout))
+			return private:DoCallback("GETALL_BAD_DATA", format("incomplete data for auction %d/%d", i, numAuctions))
 		end
 
 		local itemBuyout = TSMAPI.Util:Round(buyout / stackSize)
@@ -678,8 +691,10 @@ function private.GetAllScanThread(self)
 		self:Yield()
 	end
 	private:DoCallback("GETALL_PROGRESS", numAuctions, numAuctions)
-	if numAuctions ~= GetNumAuctionItems("list") then
-		return private:DoCallback("GETALL_BAD_DATA")
+	local numAuctionsNow = GetNumAuctionItems("list")
+	if numAuctions ~= numAuctionsNow then
+		TSM:LOG_ERR("GetAll scan: auction count changed during the scan (was %d, now %d)", numAuctions, numAuctionsNow)
+		return private:DoCallback("GETALL_BAD_DATA", format("auction list changed size during the scan (%d -> %d)", numAuctions, numAuctionsNow))
 	end
 
 	private:DoCallback("SCAN_COMPLETE", scanData)
